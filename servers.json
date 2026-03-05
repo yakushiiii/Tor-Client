@@ -1,0 +1,19 @@
+{
+    "servers": {
+        "server1": {
+            "server_address": "127.0.0.1",
+            "public_key": "be4420b424085b51bad775e8384cc15c6ebc22c49cf169cd8635f56caa28283e",
+            "port": "9000"
+        },
+        "server2": {
+            "server_address": "127.0.0.1",
+            "public_key": "cee95351c9c12d143aa18aaf0e665b3f24aa7056d092c7f75131736ac0de6944",
+            "port": "9000"
+        },
+        "server3": {
+            "server_address": "127.0.0.1",
+            "public_key": "c3347a3b97843e798bf56dee5fa4485bc7453476ca47789f9b954b5496daaa1e",
+            "port": "9000"
+        }  
+    }
+}
