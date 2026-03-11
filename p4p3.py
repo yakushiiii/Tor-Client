@@ -1,5 +1,6 @@
 # Note: This is how I did it. It's just one way, there are multiple ways on doing this.
 
+import sys
 import socket
 import threading
 import os
@@ -15,21 +16,53 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+def generate_key_pair():
+    private_key = x25519.X25519PrivateKey.generate()
+    public_key = private_key.public_key()
+
+    return private_key, public_key
+
+
+priv_key, pub_key = generate_key_pair()
+pub_bytes = pub_key.public_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PublicFormat.Raw
+    )
+pub_hex = pub_bytes.hex()
 
 # Function to encrypt a message using the public key
-def encrypt_message(message, session_key):
+def encrypt_message(message, session_key, nonce):
     # Encrypt message
-    f = Fernet(session_key)
-    encoded_encrypted_message = f.encrypt(message)
-
+    recv_key = x25519.X25519PublicKey.from_public_bytes(session_key)
+    shared_secret = priv_key.exchange(recv_key) 
+    info = b'tor-client-layer-encryption'
+    derived_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b'tor-encryption-protocol',
+        info=info
+    ).derive(shared_secret)
+    aesgcm = AESGCM(derived_key)
+    encoded_encrypted_message = aesgcm.encrypt(nonce, message, None)
     return encoded_encrypted_message
 
 
 # Function to decrypt a message using the private key
-def decrypt_message(encrypted_message, session_key):
-    f = Fernet(session_key)
-    decrypted_message = f.decrypt(encrypted_message)
-    return decrypted_message
+# encrypted_message: bytes
+# session_key: public_bytes or whatever x25519 takes
+def decrypt_message(encrypted_message, session_key, nonce):
+    recv_key = x25519.X25519PublicKey.from_public_bytes(session_key)
+    shared_secret = priv_key.exchange(recv_key) 
+    info = b'tor-client-layer-encryption'
+    derived_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b'tor-encryption-protocol',
+        info=info
+    ).derive(shared_secret)
+    aesgcm = AESGCM(derived_key)
+    payload = aesgcm.decrypt(nonce, encrypted_message, None)
+    return payload
 
 def AddNodetoJson(node_name, public_key, port):
     with open("servers.json", "r") as file:
@@ -56,18 +89,6 @@ def GetClientKey(port):
             return server_public_key
 
     return None
-def generate_key_pair():
-    private_key = x25519.X25519PrivateKey.generate()
-    public_key = private_key.public_key()
-
-    return private_key, public_key
-
-priv_key, pub_key = generate_key_pair()
-pub_bytes = pub_key.public_bytes(
-    encoding=serialization.Encoding.Raw,
-    format=serialization.PublicFormat.Raw
-    )
-pub_hex = pub_bytes.hex()
 
 class Node:
     PORT_START = 9000
@@ -91,55 +112,55 @@ class Node:
             tf = True
             while True:
                 try:
-                    data = conn.recv(4098)
+                    self.prev_conn = conn
+                    data = conn.recv(50)
                     if not data:
                         break
                     # process data
-                    msg_len = struct.unpack("!I", data[0:4])
-                    if len(msg_len) < 1:
+                    response = struct.unpack("!32s12sHI", data)
+                    if (len(response) < 3):
+                        print("less than 3 items returned")
                         break
-                    msg = data[38:msg_len[0]]
-                    client_pub_key = data[38:msg_len[0]]
-                    print("msg (bytes)=", msg)
-                    #print("pub=", client_pub_key.decode())
-                    addr_tupl = conn.getsockname()
-                    print(f"recv from {addr_tupl[1]}")
-                    recv_key = GetClientKey(addr_tupl[1])
-                    if recv_key == None:
-                        print("no pub key")
-                        return
-                    shared_secret = priv_key.exchange(recv_key) 
-                    print("shared= ", shared_secret)
-                    info = b'tor-client-layer-encryption'
-                    derived_key = HKDF(
-                        algorithm=hashes.SHA256(),
-                        length=32,
-                        salt=b'tor-encryption-protocol',
-                        info=info
-                    ).derive(shared_secret)
-                    aesgcm = AESGCM(derived_key)
-                    print("got derived key")
-                    nonce = 1
-                    nonce = nonce.to_bytes(12, "big")
-                    txt = aesgcm.decrypt(nonce, msg, None)
-                    print("msg= ", txt)
+                    cli_key = response[0]
+                    nonce = response[1]
+                    nodeNum = response[2]
+                    body_size = response[3]
+                    msg = conn.recv(body_size)
+                    payload = decrypt_message(msg, cli_key, nonce)
                 except socket.timeout:
                     break
                 except Exception as e:
                     print(f"Node {self.id} Error during receiving: {e}")
                     break
 
-            if nodeNum > 0:
-                pass
-            # Send it to the next node
-            else:
-                # Decrypt the data
+            if nodeNum > 0: 
+                # Send it to the next node
+                proc = payload.split(b'|', 2)
+                ip = proc[0].decode()
+                port = proc[1].decode()
+                body = proc[2]
+                print(f"to: ({ip}:{port})")
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as nextNode:
+                    nextNode.connect((ip, int(port)))
+                    nextNode.sendall(body)
+                    response = nextNode.recv(4096)
+                    # encrypt here
+                    encrypted_response = encrypt_message(response, cli_key, nonce)
+                    # send back to the host
+                    print("received! sending to prev node...")
+                    header = struct.pack("!I", len(encrypted_response))
+                    self.send_data(header + encrypted_response, conn)
 
+
+
+            else:
+                print("reached exit node")
+                # Decrypt the data
                 # Create a SSL Socket
+                decrypted_data = payload
                 dest_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-
-                # Get the final host from the HTTP Header
+                # Get the final host from the    HTTP Header
                 address = self.extract_host(decrypted_data)
 
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as dest_socket:
@@ -152,10 +173,12 @@ class Node:
                         ssock.sendall(decrypted_data)
                         # Receive the response from the final host
                         response = ssock.recv(4096)
+                        print("received final response! sending to prev node...")
                         # Encrypt the response
-
+                        encrypted_response = encrypt_message(response, cli_key, nonce)
+                        header = struct.pack("!I", len(encrypted_response))
                         # Send the encrypted response to the previous node
-                        self.send_data(encrypted_response, conn)
+                        self.send_data(header + encrypted_response, conn)
 
         except Exception as e:
             print(f"Node {self.id} Error: {e}")
@@ -174,7 +197,11 @@ class Node:
 
     def send_data(self, data, s=None):
         # Send data to the node. In my implementation, s is a socket, the same from which the data was received. If it's sending to a new socket, s should be None and a new socket should be created.
-        pass
+        if s:
+            # TODO: add the struct for packet len here
+            s.sendall(data) 
+        else:
+            print("no prev node")
 
     def start(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -183,12 +210,18 @@ class Node:
             print(f"Node {self.id} listening on port {self.port}")
             while True:
                 conn, addr = s.accept()
-                print("start")
+                print("starting new request...")
                 client_thread = threading.Thread(
                     target=self.handle_client, args=(conn, addr)
                 )
                 client_thread.start()
 
-node = Node(0, None, None, priv_key)
-AddNodetoJson("server0", pub_hex, node.port)
+given_id = sys.argv[1]
+
+if given_id == None:
+    print("no id given")
+    exit(1)
+
+node = Node(int(given_id), None, None, priv_key)
+AddNodetoJson(f"server{given_id}", pub_hex, node.port)
 node.start()
