@@ -199,6 +199,7 @@ class Node:
         # Send data to the node. In my implementation, s is a socket, the same from which the data was received. If it's sending to a new socket, s should be None and a new socket should be created.
         if s:
             # TODO: add the struct for packet len here
+            print(f"sending: {data[:12]}...")
             s.sendall(data) 
         else:
             print("no prev node")
